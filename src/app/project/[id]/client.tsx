@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ArrowLeft, Settings, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,18 +12,38 @@ import type { Message, Task } from "@/types";
 
 interface WorkspaceClientProps {
   projectId: string;
+  projectName: string;
   user: {
     id?: string;
     name?: string | null;
   };
 }
 
-export function WorkspaceClient({ projectId, user }: WorkspaceClientProps) {
+export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClientProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [isAgentWorking, setIsAgentWorking] = useState(false);
+  const [agentStatus, setAgentStatus] = useState("");
+
+  // Load existing messages, tasks, and files on mount
+  useEffect(() => {
+    // Fetch messages
+    fetch(`/api/projects/${projectId}/messages`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then(setMessages);
+
+    // Fetch tasks
+    fetch(`/api/projects/${projectId}/tasks`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then(setTasks);
+
+    // Fetch files
+    fetch(`/api/projects/${projectId}/files`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => setFiles(data.map?.((f: { path: string }) => f.path) ?? []));
+  }, [projectId]);
 
   async function handleSendMessage(content: string) {
     // Add user message to chat
@@ -39,6 +59,7 @@ export function WorkspaceClient({ projectId, user }: WorkspaceClientProps) {
     };
     setMessages((prev) => [...prev, userMessage]);
     setIsAgentWorking(true);
+    setAgentStatus("Thinking...");
 
     try {
       const res = await fetch(`/api/projects/${projectId}/chat`, {
@@ -58,7 +79,39 @@ export function WorkspaceClient({ projectId, user }: WorkspaceClientProps) {
         if (data.files) {
           setFiles(data.files);
         }
+        setAgentStatus("");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            projectId,
+            role: "system",
+            content: `Agent error: ${err.error || res.statusText || "Request failed"}. Try again.`,
+            metadata: {},
+            toolCalls: null,
+            tokenCount: null,
+            createdAt: new Date(),
+          },
+        ]);
+        setAgentStatus("");
       }
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          projectId,
+          role: "system",
+          content: "Request timed out or failed. The agent may still be processing. Try again in a moment.",
+          metadata: {},
+          toolCalls: null,
+          tokenCount: null,
+          createdAt: new Date(),
+        },
+      ]);
+      setAgentStatus("");
     } finally {
       setIsAgentWorking(false);
     }
@@ -94,7 +147,7 @@ export function WorkspaceClient({ projectId, user }: WorkspaceClientProps) {
             Dashboard
           </Link>
           <span className="text-border">/</span>
-          <span className="text-sm font-medium">Project</span>
+          <span className="text-sm font-medium">{projectName}</span>
         </div>
         <div className="flex items-center gap-2">
           <Link href={`/project/${projectId}/settings`}>
@@ -118,6 +171,7 @@ export function WorkspaceClient({ projectId, user }: WorkspaceClientProps) {
               messages={messages}
               onSendMessage={handleSendMessage}
               isAgentWorking={isAgentWorking}
+              agentStatus={agentStatus}
             />
           </div>
           <TasksPanel tasks={tasks} />

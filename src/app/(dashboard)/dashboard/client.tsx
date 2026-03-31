@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Plus } from "lucide-react";
 import { signOut } from "next-auth/react";
 import { TopBar } from "@/components/dashboard/top-bar";
@@ -20,8 +20,17 @@ interface DashboardClientProps {
 
 export function DashboardClient({ user }: DashboardClientProps) {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+
+  // Fetch projects on mount
+  useEffect(() => {
+    fetch("/api/projects")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => setProjects(data))
+      .finally(() => setLoading(false));
+  }, []);
 
   const filtered = projects.filter((p) =>
     p.name.toLowerCase().includes(search.toLowerCase())
@@ -59,7 +68,11 @@ export function DashboardClient({ user }: DashboardClientProps) {
             </Button>
           </div>
 
-          {filtered.length > 0 ? (
+          {loading ? (
+            <div className="flex justify-center py-20">
+              <p className="text-text-secondary">Loading projects...</p>
+            </div>
+          ) : filtered.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {filtered.map((project) => (
                 <ProjectCard key={project.id} project={project} />
