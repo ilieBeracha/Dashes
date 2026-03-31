@@ -5,6 +5,9 @@ import { projects, messages, tasks } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { routeMessage, callAgent } from "@/lib/agents/orchestrator";
 
+// Allow up to 60 seconds for agent calls
+export const maxDuration = 60;
+
 interface Params {
   params: Promise<{ id: string }>;
 }
