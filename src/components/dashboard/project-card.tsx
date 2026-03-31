@@ -41,8 +41,9 @@ export function ProjectCard({ project }: ProjectCardProps) {
   );
 }
 
-function getTimeAgo(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+function getTimeAgo(date: Date | string): string {
+  const ts = typeof date === "string" ? new Date(date).getTime() : date.getTime();
+  const seconds = Math.floor((Date.now() - ts) / 1000);
   if (seconds < 60) return "just now";
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;

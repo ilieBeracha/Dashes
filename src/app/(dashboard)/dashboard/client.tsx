@@ -28,7 +28,7 @@ export function DashboardClient({ user }: DashboardClientProps) {
   useEffect(() => {
     fetch("/api/projects")
       .then((res) => (res.ok ? res.json() : []))
-      .then((data) => setProjects(data))
+      .then((data) => setProjects(Array.isArray(data) ? data : []))
       .finally(() => setLoading(false));
   }, []);
 
