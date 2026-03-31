@@ -14,11 +14,5 @@
       ]
     }
   ],
-  "env": {
-    "DATABASE_URL": "@database-url",
-    "AUTH_SECRET": "@auth-secret",
-    "AUTH_GITHUB_ID": "@auth-github-id",
-    "AUTH_GITHUB_SECRET": "@auth-github-secret",
-    "ANTHROPIC_API_KEY": "@anthropic-api-key"
-  }
+  "env": {}
 }
