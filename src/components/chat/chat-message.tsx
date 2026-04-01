@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Bot, User, ClipboardList, Hammer, Rocket, AlertCircle } from "lucide-react";
+import { User, ClipboardList, Hammer, Rocket, AlertCircle } from "lucide-react";
 import type { Message } from "@/types";
 
 interface ChatMessageProps {
@@ -19,6 +19,9 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
 
+  // Skip rendering empty messages
+  if (!message.content?.trim()) return null;
+
   return (
     <div
       className={cn("mb-3 flex gap-2.5", {
@@ -35,11 +38,14 @@ export function ChatMessage({ message }: ChatMessageProps) {
       </div>
 
       <div
-        className={cn("max-w-[85%] rounded-2xl px-3.5 py-2.5 sm:max-w-[80%]", {
-          "bg-accent text-white": isUser,
-          "bg-bg-tertiary": !isUser && !isSystem,
-          "border border-error/30 bg-error/10": isSystem,
-        })}
+        className={cn(
+          "max-w-[85%] rounded-2xl px-3.5 py-2.5 sm:max-w-[80%]",
+          {
+            "bg-accent text-white": isUser,
+            "bg-bg-tertiary": !isUser && !isSystem,
+            "border border-error/30 bg-error/10": isSystem,
+          }
+        )}
       >
         {!isUser && (
           <span
@@ -52,9 +58,28 @@ export function ChatMessage({ message }: ChatMessageProps) {
           </span>
         )}
         <div className="whitespace-pre-wrap text-[13px] leading-relaxed">
-          {message.content}
+          <FormattedText text={message.content} />
         </div>
       </div>
     </div>
+  );
+}
+
+/** Render simple markdown bold (**text**) as <strong> */
+function FormattedText({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.startsWith("**") && part.endsWith("**")) {
+          return (
+            <strong key={i} className="font-semibold">
+              {part.slice(2, -2)}
+            </strong>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
   );
 }
