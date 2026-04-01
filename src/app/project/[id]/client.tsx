@@ -2,13 +2,22 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { ArrowLeft, Settings, Rocket } from "lucide-react";
+import {
+  ArrowLeft,
+  Settings,
+  Rocket,
+  MessageSquare,
+  FolderOpen,
+  Eye,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { TasksPanel } from "@/components/tasks/tasks-panel";
 import { FilesPanel } from "@/components/files/files-panel";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import type { Message, Task } from "@/types";
+
+type MobileTab = "chat" | "files" | "preview";
 
 interface WorkspaceClientProps {
   projectId: string;
@@ -19,7 +28,11 @@ interface WorkspaceClientProps {
   };
 }
 
-export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClientProps) {
+export function WorkspaceClient({
+  projectId,
+  projectName,
+  user,
+}: WorkspaceClientProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [files, setFiles] = useState<string[]>([]);
@@ -27,6 +40,7 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
   const [isAgentWorking, setIsAgentWorking] = useState(false);
   const [agentStatus, setAgentStatus] = useState("");
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 
   // Load existing messages, tasks, and files on mount
   useEffect(() => {
@@ -40,12 +54,13 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
 
     fetch(`/api/projects/${projectId}/files`)
       .then((res) => (res.ok ? res.json() : []))
-      .then((data) => setFiles(data.map?.((f: { path: string }) => f.path) ?? []));
+      .then(
+        (data) => setFiles(data.map?.((f: { path: string }) => f.path) ?? [])
+      );
   }, [projectId]);
 
   const handleSendMessage = useCallback(
     async (content: string) => {
-      // Add user message to chat
       const userMessage: Message = {
         id: crypto.randomUUID(),
         projectId,
@@ -116,17 +131,14 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
             } else if (line.startsWith("data: ")) {
               currentData = line.slice(6).trim();
             } else if (line === "" && currentEvent && currentData) {
-              // End of event — process it
               handleSSEEvent(currentEvent, currentData);
               currentEvent = "";
               currentData = "";
             } else if (line !== "") {
-              // Incomplete event, put back in buffer
               buffer += line + "\n";
             }
           }
 
-          // If we have an incomplete event in progress, keep it in buffer
           if (currentEvent || currentData) {
             if (currentEvent) buffer += `event: ${currentEvent}\n`;
             if (currentData) buffer += `data: ${currentData}\n`;
@@ -207,7 +219,6 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
           break;
 
         case "tool_error":
-          // Tool errors are informational — builder continues
           break;
 
         case "error":
@@ -227,7 +238,6 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
           break;
 
         case "done":
-          // Stream complete
           break;
       }
     } catch {
@@ -252,22 +262,28 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
     }
   }
 
+  const MOBILE_TABS: { key: MobileTab; label: string; icon: typeof MessageSquare }[] = [
+    { key: "chat", label: "Chat", icon: MessageSquare },
+    { key: "files", label: "Files", icon: FolderOpen },
+    { key: "preview", label: "Preview", icon: Eye },
+  ];
+
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-[100dvh] flex-col">
       {/* Top bar */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-bg-secondary px-4">
-        <div className="flex items-center gap-3">
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-bg-secondary px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <Link
             href="/dashboard"
-            className="flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary"
+            className="flex shrink-0 items-center gap-1 text-sm text-text-secondary hover:text-text-primary"
           >
             <ArrowLeft className="h-4 w-4" />
-            Dashboard
+            <span className="hidden sm:inline">Dashboard</span>
           </Link>
           <span className="text-border">/</span>
-          <span className="text-sm font-medium">{projectName}</span>
+          <span className="truncate text-sm font-medium">{projectName}</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <Link href={`/project/${projectId}/settings`}>
             <Button variant="ghost" size="sm">
               <Settings className="h-4 w-4" />
@@ -275,13 +291,13 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
           </Link>
           <Button size="sm" onClick={handleDeploy} disabled={isAgentWorking}>
             <Rocket className="h-4 w-4" />
-            Deploy
+            <span className="hidden sm:inline">Deploy</span>
           </Button>
         </div>
       </header>
 
-      {/* Workspace panels */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Desktop layout */}
+      <div className="hidden flex-1 overflow-hidden md:flex">
         {/* Left: Chat + Tasks */}
         <div className="flex w-[400px] shrink-0 flex-col border-r border-border">
           <div className="flex-1 overflow-hidden">
@@ -310,6 +326,56 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
             <PreviewPanel projectId={projectId} />
           </div>
         </div>
+      </div>
+
+      {/* Mobile layout */}
+      <div className="flex flex-1 flex-col overflow-hidden md:hidden">
+        {/* Active tab content */}
+        <div className="flex-1 overflow-hidden">
+          {mobileTab === "chat" && (
+            <div className="flex h-full flex-col">
+              <div className="flex-1 overflow-hidden">
+                <ChatPanel
+                  messages={messages}
+                  onSendMessage={handleSendMessage}
+                  isAgentWorking={isAgentWorking}
+                  agentStatus={agentStatus}
+                  activeAgent={activeAgent}
+                />
+              </div>
+              <TasksPanel tasks={tasks} />
+            </div>
+          )}
+          {mobileTab === "files" && (
+            <FilesPanel
+              files={files}
+              activeFile={activeFile}
+              onSelectFile={setActiveFile}
+              projectId={projectId}
+            />
+          )}
+          {mobileTab === "preview" && (
+            <PreviewPanel projectId={projectId} />
+          )}
+        </div>
+
+        {/* Bottom tab bar */}
+        <nav className="flex shrink-0 border-t border-border bg-bg-secondary">
+          {MOBILE_TABS.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setMobileTab(key)}
+              className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-xs transition-colors ${
+                mobileTab === key
+                  ? "text-accent"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              <Icon className="h-5 w-5" />
+              {label}
+            </button>
+          ))}
+        </nav>
       </div>
     </div>
   );

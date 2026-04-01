@@ -74,6 +74,44 @@ export async function POST(request: NextRequest, { params }: Params) {
   });
 }
 
+/**
+ * Creates a tool executor that streams progress to the SSE client.
+ */
+function createStreamingToolExecutor(
+  controller: ReadableStreamDefaultController,
+  projectId: string
+) {
+  return async (
+    toolName: string,
+    _toolId: string,
+    input: Record<string, unknown>
+  ) => {
+    // Stream what the agent is doing
+    sendEvent(controller, "tool_exec", {
+      tool: toolName,
+      input:
+        toolName === "write_file"
+          ? { path: input.path }
+          : toolName === "delete_file"
+            ? { path: input.path }
+            : toolName === "read_file"
+              ? { path: input.path }
+              : input,
+    });
+
+    const result = await executeTool(projectId, toolName, input);
+
+    if (!result.success) {
+      sendEvent(controller, "tool_error", {
+        tool: toolName,
+        error: result.output,
+      });
+    }
+
+    return result;
+  };
+}
+
 async function runAgentPipeline(
   controller: ReadableStreamDefaultController,
   projectId: string,
@@ -128,29 +166,36 @@ async function runAgentPipeline(
 
   sendEvent(controller, "status", {
     agent: agentType,
-    message: agentType === "planner"
-      ? "Analyzing your request..."
-      : agentType === "builder"
-        ? "Preparing to build..."
-        : "Preparing deployment...",
+    message:
+      agentType === "planner"
+        ? "Analyzing your request..."
+        : agentType === "builder"
+          ? "Preparing to build..."
+          : "Preparing deployment...",
   });
 
-  // Call the agent
-  const agentResponse = await callAgent(agentType, {
-    projectId,
-    recentMessages: recentMessages.reverse().map((m) => ({
-      role: m.role,
-      content: m.content,
-    })),
-    taskList: currentTasks.map((t) => ({
-      title: t.title,
-      description: t.description,
-      status: t.status,
-    })),
-    fileManifest,
-    relevantFiles: [],
-    toolbarContext: toolbarContext || undefined,
-  });
+  const toolExecutor = createStreamingToolExecutor(controller, projectId);
+
+  // Call the agent with the tool-use loop
+  const agentResponse = await callAgent(
+    agentType,
+    {
+      projectId,
+      recentMessages: recentMessages.reverse().map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+      taskList: currentTasks.map((t) => ({
+        title: t.title,
+        description: t.description,
+        status: t.status,
+      })),
+      fileManifest,
+      relevantFiles: [],
+      toolbarContext: toolbarContext || undefined,
+    },
+    toolExecutor
+  );
 
   // Save agent response
   const [savedMessage] = await db
@@ -170,7 +215,7 @@ async function runAgentPipeline(
   if (agentResponse.tasks && agentResponse.tasks.length > 0) {
     sendEvent(controller, "status", {
       agent: "planner",
-      message: `Creating ${agentResponse.tasks.length} tasks...`,
+      message: `Created ${agentResponse.tasks.length} tasks`,
     });
 
     // Clear existing pending tasks
@@ -208,18 +253,25 @@ async function runAgentPipeline(
       message: "Starting to build...",
     });
 
-    await runBuilderLoop(controller, projectId, savedTasks, fileManifest);
+    await runBuilderLoop(controller, projectId, savedTasks);
   }
+
+  // Send final file list
+  const updatedFiles = await db
+    .select({ path: projectFiles.path })
+    .from(projectFiles)
+    .where(eq(projectFiles.projectId, projectId));
+  sendEvent(controller, "files", { files: updatedFiles.map((f) => f.path) });
 }
 
 /**
  * Run the builder agent in a loop, executing one task at a time.
+ * Each task gets a full agentic tool-use loop (multi-turn).
  */
 async function runBuilderLoop(
   controller: ReadableStreamDefaultController,
   projectId: string,
-  taskList: typeof tasks.$inferSelect[],
-  fileManifest: string[]
+  taskList: (typeof tasks.$inferSelect)[]
 ) {
   const pendingTasks = taskList.filter((t) => t.status === "pending");
 
@@ -256,67 +308,44 @@ async function runBuilderLoop(
         .where(eq(tasks.projectId, projectId))
         .orderBy(tasks.orderIndex);
 
-      // Get updated file manifest
       const fileList = await db
         .select({ path: projectFiles.path })
         .from(projectFiles)
         .where(eq(projectFiles.projectId, projectId));
       const currentManifest = fileList.map((f) => f.path);
 
-      // Call builder agent for this specific task
-      const builderResponse = await callAgent("builder", {
-        projectId,
-        recentMessages: [
-          ...recentMessages.reverse().map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          {
-            role: "user",
-            content: `Execute this task now:\n\nTitle: ${task.title}\nDescription: ${task.description}\nFiles: ${(task.files ?? []).join(", ")}`,
-          },
-        ],
-        taskList: allTasks.map((t) => ({
-          title: t.title,
-          description: t.description,
-          status: t.status,
-        })),
-        fileManifest: currentManifest,
-        relevantFiles: [],
-      });
+      const toolExecutor = createStreamingToolExecutor(controller, projectId);
 
-      // Execute tool calls from the builder
-      let taskFailed = false;
-      for (const tc of builderResponse.toolCalls) {
-        if (tc.toolName === "hand_to_planner") {
-          // Builder wants to escalate — skip remaining tools and mark failed
-          taskFailed = true;
-          break;
-        }
-
-        sendEvent(controller, "tool_exec", {
-          tool: tc.toolName,
-          input: tc.toolName === "write_file"
-            ? { path: (tc.input as Record<string, unknown>).path }
-            : tc.input,
-        });
-
-        const result = await executeTool(
+      // Call builder agent with full tool-use loop
+      const builderResponse = await callAgent(
+        "builder",
+        {
           projectId,
-          tc.toolName,
-          tc.input as Record<string, unknown>
-        );
+          recentMessages: [
+            ...recentMessages.reverse().map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            {
+              role: "user",
+              content: `Execute this task now:\n\nTitle: ${task.title}\nDescription: ${task.description}\nFiles: ${(task.files ?? []).join(", ")}`,
+            },
+          ],
+          taskList: allTasks.map((t) => ({
+            title: t.title,
+            description: t.description,
+            status: t.status,
+          })),
+          fileManifest: currentManifest,
+          relevantFiles: [],
+        },
+        toolExecutor
+      );
 
-        if (!result.success) {
-          sendEvent(controller, "tool_error", {
-            tool: tc.toolName,
-            error: result.output,
-          });
-        }
-      }
-
-      // Update task status
+      // Determine outcome
+      const taskFailed = !!builderResponse.handoff;
       const finalStatus = taskFailed ? "failed" : "done";
+
       await db
         .update(tasks)
         .set({
@@ -350,15 +379,6 @@ async function runBuilderLoop(
           agentType: "builder",
         });
       }
-
-      // Update file list
-      const updatedFiles = await db
-        .select({ path: projectFiles.path })
-        .from(projectFiles)
-        .where(eq(projectFiles.projectId, projectId));
-      sendEvent(controller, "files", {
-        files: updatedFiles.map((f) => f.path),
-      });
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
