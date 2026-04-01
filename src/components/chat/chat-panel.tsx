@@ -11,6 +11,7 @@ interface ChatPanelProps {
   onSendMessage: (content: string) => void;
   isAgentWorking: boolean;
   agentStatus?: string;
+  activeAgent?: string | null;
 }
 
 export function ChatPanel({
@@ -18,6 +19,7 @@ export function ChatPanel({
   onSendMessage,
   isAgentWorking,
   agentStatus,
+  activeAgent,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -53,7 +55,7 @@ export function ChatPanel({
         {messages.map((msg) => (
           <ChatMessage key={msg.id} message={msg} />
         ))}
-        {isAgentWorking && <AgentThinking status={agentStatus} />}
+        {isAgentWorking && <AgentThinking status={agentStatus} agent={activeAgent} />}
         <div ref={messagesEndRef} />
       </div>
 
