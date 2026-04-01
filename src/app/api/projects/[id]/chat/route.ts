@@ -1,18 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/db";
-import { projects, messages, tasks } from "@/db/schema";
+import { projects, messages, tasks, projectFiles } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { routeMessage, callAgent } from "@/lib/agents/orchestrator";
+import { executeTool } from "@/lib/agents/tool-executor";
 
-// Allow up to 60 seconds for agent calls
-export const maxDuration = 60;
+// Allow up to 120 seconds for agent calls (planning + building)
+export const maxDuration = 120;
 
 interface Params {
   params: Promise<{ id: string }>;
 }
 
-// POST /api/projects/:id/chat — send a message to the project chat
+/**
+ * Send an SSE event to the client.
+ */
+function sendEvent(
+  controller: ReadableStreamDefaultController,
+  event: string,
+  data: unknown
+) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  controller.enqueue(new TextEncoder().encode(payload));
+}
+
+// POST /api/projects/:id/chat — send a message to the project chat (SSE stream)
 export async function POST(request: NextRequest, { params }: Params) {
   const session = await auth();
   if (!session?.user?.id) {
@@ -37,9 +50,40 @@ export async function POST(request: NextRequest, { params }: Params) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        await runAgentPipeline(controller, id, content, toolbarContext, project);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        sendEvent(controller, "error", { error: message });
+      } finally {
+        sendEvent(controller, "done", {});
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+async function runAgentPipeline(
+  controller: ReadableStreamDefaultController,
+  projectId: string,
+  content: string,
+  toolbarContext: Record<string, unknown> | undefined,
+  project: { hasActivePlan: boolean }
+) {
   // Save user message
   await db.insert(messages).values({
-    projectId: id,
+    projectId,
     role: "user",
     content,
     metadata: toolbarContext ? { toolbar: toolbarContext } : {},
@@ -49,7 +93,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   const recentMessages = await db
     .select({ role: messages.role, content: messages.content })
     .from(messages)
-    .where(eq(messages.projectId, id))
+    .where(eq(messages.projectId, projectId))
     .orderBy(desc(messages.createdAt))
     .limit(20);
 
@@ -57,7 +101,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   const currentTasks = await db
     .select()
     .from(tasks)
-    .where(eq(tasks.projectId, id))
+    .where(eq(tasks.projectId, projectId))
     .orderBy(tasks.orderIndex);
 
   const hasPendingTasks = currentTasks.some(
@@ -65,6 +109,13 @@ export async function POST(request: NextRequest, { params }: Params) {
   );
   const allTasksDone =
     currentTasks.length > 0 && currentTasks.every((t) => t.status === "done");
+
+  // Get file manifest
+  const fileList = await db
+    .select({ path: projectFiles.path })
+    .from(projectFiles)
+    .where(eq(projectFiles.projectId, projectId));
+  const fileManifest = fileList.map((f) => f.path);
 
   // Route to the right agent
   const agentType = routeMessage(
@@ -75,9 +126,18 @@ export async function POST(request: NextRequest, { params }: Params) {
     !!toolbarContext
   );
 
+  sendEvent(controller, "status", {
+    agent: agentType,
+    message: agentType === "planner"
+      ? "Analyzing your request..."
+      : agentType === "builder"
+        ? "Preparing to build..."
+        : "Preparing deployment...",
+  });
+
   // Call the agent
   const agentResponse = await callAgent(agentType, {
-    projectId: id,
+    projectId,
     recentMessages: recentMessages.reverse().map((m) => ({
       role: m.role,
       content: m.content,
@@ -87,8 +147,8 @@ export async function POST(request: NextRequest, { params }: Params) {
       description: t.description,
       status: t.status,
     })),
-    fileManifest: [], // TODO: load from project_files
-    relevantFiles: [], // TODO: load relevant files from S3
+    fileManifest,
+    relevantFiles: [],
     toolbarContext: toolbarContext || undefined,
   });
 
@@ -96,29 +156,34 @@ export async function POST(request: NextRequest, { params }: Params) {
   const [savedMessage] = await db
     .insert(messages)
     .values({
-      projectId: id,
+      projectId,
       role: agentType,
       content: agentResponse.content,
       toolCalls: agentResponse.toolCalls,
     })
     .returning();
 
-  // If planner created tasks, save them
+  sendEvent(controller, "message", { message: savedMessage, agentType });
+
+  // If planner created tasks, save them and auto-trigger builder
   let savedTasks = currentTasks;
-  if (agentResponse.tasks) {
+  if (agentResponse.tasks && agentResponse.tasks.length > 0) {
+    sendEvent(controller, "status", {
+      agent: "planner",
+      message: `Creating ${agentResponse.tasks.length} tasks...`,
+    });
+
     // Clear existing pending tasks
     await db
       .delete(tasks)
-      .where(
-        and(eq(tasks.projectId, id), eq(tasks.status, "pending"))
-      );
+      .where(and(eq(tasks.projectId, projectId), eq(tasks.status, "pending")));
 
     // Insert new tasks
     const newTasks = await db
       .insert(tasks)
       .values(
         agentResponse.tasks.map((t, i) => ({
-          projectId: id,
+          projectId,
           title: t.title,
           description: t.description,
           orderIndex: i,
@@ -132,14 +197,214 @@ export async function POST(request: NextRequest, { params }: Params) {
     await db
       .update(projects)
       .set({ hasActivePlan: true, currentAgent: agentType })
-      .where(eq(projects.id, id));
+      .where(eq(projects.id, projectId));
 
     savedTasks = newTasks;
+    sendEvent(controller, "tasks", { tasks: savedTasks });
+
+    // Auto-trigger builder to start executing tasks
+    sendEvent(controller, "status", {
+      agent: "builder",
+      message: "Starting to build...",
+    });
+
+    await runBuilderLoop(controller, projectId, savedTasks, fileManifest);
+  }
+}
+
+/**
+ * Run the builder agent in a loop, executing one task at a time.
+ */
+async function runBuilderLoop(
+  controller: ReadableStreamDefaultController,
+  projectId: string,
+  taskList: typeof tasks.$inferSelect[],
+  fileManifest: string[]
+) {
+  const pendingTasks = taskList.filter((t) => t.status === "pending");
+
+  for (const task of pendingTasks) {
+    // Mark task as in_progress
+    await db
+      .update(tasks)
+      .set({ status: "in_progress", startedAt: new Date() })
+      .where(eq(tasks.id, task.id));
+
+    sendEvent(controller, "task_status", {
+      taskId: task.id,
+      status: "in_progress",
+      title: task.title,
+    });
+
+    sendEvent(controller, "status", {
+      agent: "builder",
+      message: `Working on: ${task.title}`,
+    });
+
+    try {
+      // Get fresh context
+      const recentMessages = await db
+        .select({ role: messages.role, content: messages.content })
+        .from(messages)
+        .where(eq(messages.projectId, projectId))
+        .orderBy(desc(messages.createdAt))
+        .limit(10);
+
+      const allTasks = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.projectId, projectId))
+        .orderBy(tasks.orderIndex);
+
+      // Get updated file manifest
+      const fileList = await db
+        .select({ path: projectFiles.path })
+        .from(projectFiles)
+        .where(eq(projectFiles.projectId, projectId));
+      const currentManifest = fileList.map((f) => f.path);
+
+      // Call builder agent for this specific task
+      const builderResponse = await callAgent("builder", {
+        projectId,
+        recentMessages: [
+          ...recentMessages.reverse().map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          {
+            role: "user",
+            content: `Execute this task now:\n\nTitle: ${task.title}\nDescription: ${task.description}\nFiles: ${(task.files ?? []).join(", ")}`,
+          },
+        ],
+        taskList: allTasks.map((t) => ({
+          title: t.title,
+          description: t.description,
+          status: t.status,
+        })),
+        fileManifest: currentManifest,
+        relevantFiles: [],
+      });
+
+      // Execute tool calls from the builder
+      let taskFailed = false;
+      for (const tc of builderResponse.toolCalls) {
+        if (tc.toolName === "hand_to_planner") {
+          // Builder wants to escalate — skip remaining tools and mark failed
+          taskFailed = true;
+          break;
+        }
+
+        sendEvent(controller, "tool_exec", {
+          tool: tc.toolName,
+          input: tc.toolName === "write_file"
+            ? { path: (tc.input as Record<string, unknown>).path }
+            : tc.input,
+        });
+
+        const result = await executeTool(
+          projectId,
+          tc.toolName,
+          tc.input as Record<string, unknown>
+        );
+
+        if (!result.success) {
+          sendEvent(controller, "tool_error", {
+            tool: tc.toolName,
+            error: result.output,
+          });
+        }
+      }
+
+      // Update task status
+      const finalStatus = taskFailed ? "failed" : "done";
+      await db
+        .update(tasks)
+        .set({
+          status: finalStatus,
+          completedAt: new Date(),
+          attempts: task.attempts + 1,
+          errorLog: taskFailed ? "Escalated to planner" : null,
+        })
+        .where(eq(tasks.id, task.id));
+
+      sendEvent(controller, "task_status", {
+        taskId: task.id,
+        status: finalStatus,
+        title: task.title,
+      });
+
+      // Save builder response as a message
+      if (builderResponse.content) {
+        const [builderMessage] = await db
+          .insert(messages)
+          .values({
+            projectId,
+            role: "builder",
+            content: builderResponse.content,
+            toolCalls: builderResponse.toolCalls,
+          })
+          .returning();
+
+        sendEvent(controller, "message", {
+          message: builderMessage,
+          agentType: "builder",
+        });
+      }
+
+      // Update file list
+      const updatedFiles = await db
+        .select({ path: projectFiles.path })
+        .from(projectFiles)
+        .where(eq(projectFiles.projectId, projectId));
+      sendEvent(controller, "files", {
+        files: updatedFiles.map((f) => f.path),
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error";
+
+      await db
+        .update(tasks)
+        .set({
+          status: "failed",
+          completedAt: new Date(),
+          attempts: task.attempts + 1,
+          errorLog: errorMessage,
+        })
+        .where(eq(tasks.id, task.id));
+
+      sendEvent(controller, "task_status", {
+        taskId: task.id,
+        status: "failed",
+        title: task.title,
+      });
+
+      sendEvent(controller, "status", {
+        agent: "builder",
+        message: `Task failed: ${task.title}`,
+      });
+    }
   }
 
-  return NextResponse.json({
-    message: savedMessage,
-    tasks: savedTasks,
-    agentType,
+  // Update project agent state
+  const finalTasks = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.projectId, projectId));
+  const allDone = finalTasks.every((t) => t.status === "done");
+
+  await db
+    .update(projects)
+    .set({
+      currentAgent: null,
+      hasActivePlan: !allDone,
+    })
+    .where(eq(projects.id, projectId));
+
+  sendEvent(controller, "status", {
+    agent: "builder",
+    message: allDone ? "All tasks completed!" : "Some tasks need attention",
   });
+
+  sendEvent(controller, "tasks", { tasks: finalTasks });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { ArrowLeft, Settings, Rocket } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,94 +26,212 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [isAgentWorking, setIsAgentWorking] = useState(false);
   const [agentStatus, setAgentStatus] = useState("");
+  const [activeAgent, setActiveAgent] = useState<string | null>(null);
 
   // Load existing messages, tasks, and files on mount
   useEffect(() => {
-    // Fetch messages
     fetch(`/api/projects/${projectId}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setMessages);
 
-    // Fetch tasks
     fetch(`/api/projects/${projectId}/tasks`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setTasks);
 
-    // Fetch files
     fetch(`/api/projects/${projectId}/files`)
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => setFiles(data.map?.((f: { path: string }) => f.path) ?? []));
   }, [projectId]);
 
-  async function handleSendMessage(content: string) {
-    // Add user message to chat
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      projectId,
-      role: "user",
-      content,
-      metadata: {},
-      toolCalls: null,
-      tokenCount: null,
-      createdAt: new Date(),
-    };
-    setMessages((prev) => [...prev, userMessage]);
-    setIsAgentWorking(true);
-    setAgentStatus("Thinking...");
+  const handleSendMessage = useCallback(
+    async (content: string) => {
+      // Add user message to chat
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        projectId,
+        role: "user",
+        content,
+        metadata: {},
+        toolCalls: null,
+        tokenCount: null,
+        createdAt: new Date(),
+      };
+      setMessages((prev) => [...prev, userMessage]);
+      setIsAgentWorking(true);
+      setAgentStatus("Connecting...");
 
-    try {
-      const res = await fetch(`/api/projects/${projectId}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
+      try {
+        const res = await fetch(`/api/projects/${projectId}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.message) {
-          setMessages((prev) => [...prev, data.message]);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              projectId,
+              role: "system",
+              content: `Agent error: ${err.error || res.statusText || "Request failed"}. Try again.`,
+              metadata: {},
+              toolCalls: null,
+              tokenCount: null,
+              createdAt: new Date(),
+            },
+          ]);
+          setIsAgentWorking(false);
+          setAgentStatus("");
+          return;
         }
-        if (data.tasks) {
-          setTasks(data.tasks);
+
+        // Read SSE stream
+        const reader = res.body?.getReader();
+        if (!reader) {
+          setIsAgentWorking(false);
+          return;
         }
-        if (data.files) {
-          setFiles(data.files);
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Parse SSE events from buffer
+          const lines = buffer.split("\n");
+          buffer = "";
+
+          let currentEvent = "";
+          let currentData = "";
+
+          for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith("data: ")) {
+              currentData = line.slice(6).trim();
+            } else if (line === "" && currentEvent && currentData) {
+              // End of event — process it
+              handleSSEEvent(currentEvent, currentData);
+              currentEvent = "";
+              currentData = "";
+            } else if (line !== "") {
+              // Incomplete event, put back in buffer
+              buffer += line + "\n";
+            }
+          }
+
+          // If we have an incomplete event in progress, keep it in buffer
+          if (currentEvent || currentData) {
+            if (currentEvent) buffer += `event: ${currentEvent}\n`;
+            if (currentData) buffer += `data: ${currentData}\n`;
+          }
         }
-        setAgentStatus("");
-      } else {
-        const err = await res.json().catch(() => ({}));
+      } catch {
         setMessages((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
             projectId,
             role: "system",
-            content: `Agent error: ${err.error || res.statusText || "Request failed"}. Try again.`,
+            content:
+              "Request timed out or failed. The agent may still be processing. Try again in a moment.",
             metadata: {},
             toolCalls: null,
             tokenCount: null,
             createdAt: new Date(),
           },
         ]);
+      } finally {
+        setIsAgentWorking(false);
         setAgentStatus("");
+        setActiveAgent(null);
       }
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          projectId,
-          role: "system",
-          content: "Request timed out or failed. The agent may still be processing. Try again in a moment.",
-          metadata: {},
-          toolCalls: null,
-          tokenCount: null,
-          createdAt: new Date(),
-        },
-      ]);
-      setAgentStatus("");
-    } finally {
-      setIsAgentWorking(false);
+    },
+    [projectId]
+  );
+
+  function handleSSEEvent(event: string, rawData: string) {
+    try {
+      const data = JSON.parse(rawData);
+
+      switch (event) {
+        case "status":
+          setAgentStatus(data.message || "");
+          if (data.agent) setActiveAgent(data.agent);
+          break;
+
+        case "message":
+          if (data.message) {
+            setMessages((prev) => [...prev, data.message]);
+          }
+          break;
+
+        case "tasks":
+          if (data.tasks) {
+            setTasks(data.tasks);
+          }
+          break;
+
+        case "task_status":
+          setTasks((prev) =>
+            prev.map((t) =>
+              t.id === data.taskId ? { ...t, status: data.status } : t
+            )
+          );
+          break;
+
+        case "files":
+          if (data.files) {
+            setFiles(data.files);
+          }
+          break;
+
+        case "tool_exec":
+          setAgentStatus(
+            data.tool === "write_file"
+              ? `Writing ${data.input?.path || "file"}...`
+              : data.tool === "read_file"
+                ? `Reading ${data.input?.path || "file"}...`
+                : data.tool === "delete_file"
+                  ? `Deleting ${data.input?.path || "file"}...`
+                  : data.tool === "install_package"
+                    ? `Installing ${data.input?.package_name || "package"}...`
+                    : `Running ${data.tool}...`
+          );
+          break;
+
+        case "tool_error":
+          // Tool errors are informational — builder continues
+          break;
+
+        case "error":
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              projectId,
+              role: "system",
+              content: `Agent error: ${data.error || "Something went wrong"}`,
+              metadata: {},
+              toolCalls: null,
+              tokenCount: null,
+              createdAt: new Date(),
+            },
+          ]);
+          break;
+
+        case "done":
+          // Stream complete
+          break;
+      }
+    } catch {
+      // Ignore malformed events
     }
   }
 
@@ -172,6 +290,7 @@ export function WorkspaceClient({ projectId, projectName, user }: WorkspaceClien
               onSendMessage={handleSendMessage}
               isAgentWorking={isAgentWorking}
               agentStatus={agentStatus}
+              activeAgent={activeAgent}
             />
           </div>
           <TasksPanel tasks={tasks} />
