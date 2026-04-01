@@ -16,6 +16,8 @@ const AGENT_CONFIG = {
   deploy: { systemPrompt: DEPLOY_SYSTEM_PROMPT, tools: DEPLOY_TOOLS },
 } as const;
 
+const MAX_TOOL_TURNS = 15;
+
 /**
  * Route a message to the appropriate agent based on project state.
  */
@@ -60,76 +62,132 @@ export function routeMessage(
 }
 
 /**
- * Call an agent with the given context and return its response.
+ * Callback for tool execution — the caller provides this so the route can
+ * execute tools and stream progress at the same time.
+ */
+export type ToolExecutor = (
+  toolName: string,
+  toolId: string,
+  input: Record<string, unknown>
+) => Promise<{ success: boolean; output: string }>;
+
+/**
+ * Call an agent with a full tool-use loop.
+ * Keeps calling Claude until it responds with end_turn (no more tool calls).
  */
 export async function callAgent(
   agentType: AgentType,
-  context: AgentContext
+  context: AgentContext,
+  onToolCall?: ToolExecutor
 ): Promise<AgentResponse> {
   const config = AGENT_CONFIG[agentType];
 
-  // Build messages array
-  const messages: Anthropic.MessageParam[] = [
-    // Inject context as first user message
+  // Build initial messages array
+  const conversationMessages: Anthropic.MessageParam[] = deduplicateRoles([
     {
       role: "user",
       content: buildContextMessage(context),
     },
-    // Map recent conversation messages
     ...context.recentMessages.map((msg) => ({
       role: (msg.role === "user" ? "user" : "assistant") as "user" | "assistant",
       content: msg.content,
     })),
-  ];
+  ]);
 
-  // Ensure messages alternate user/assistant
-  const cleanedMessages = deduplicateRoles(messages);
+  const tools = config.tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema as Anthropic.Tool["input_schema"],
+  }));
 
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 4096,
-    system: config.systemPrompt,
-    tools: config.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.input_schema as Anthropic.Tool["input_schema"],
-    })),
-    messages: cleanedMessages,
-  });
-
-  // Parse response
-  const textContent = response.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n");
-
-  const toolCalls = response.content
-    .filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
-    )
-    .map((block) => ({
-      toolName: block.name,
-      input: block.input as Record<string, unknown>,
-    }));
-
-  // Check for handoff
+  const allTextParts: string[] = [];
+  const allToolCalls: { toolName: string; input: Record<string, unknown> }[] = [];
   let handoff: AgentType | undefined;
-  for (const tc of toolCalls) {
-    if (tc.toolName === "hand_to_planner") handoff = "planner";
-    if (tc.toolName === "hand_to_builder") handoff = "builder";
+  let extractedTasks: AgentResponse["tasks"];
+
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      system: config.systemPrompt,
+      tools,
+      messages: conversationMessages,
+    });
+
+    // Collect text blocks
+    const textBlocks = response.content.filter(
+      (b): b is Anthropic.TextBlock => b.type === "text"
+    );
+    for (const block of textBlocks) {
+      allTextParts.push(block.text);
+    }
+
+    // Collect tool_use blocks
+    const toolUseBlocks = response.content.filter(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+    );
+
+    for (const block of toolUseBlocks) {
+      const tc = {
+        toolName: block.name,
+        input: block.input as Record<string, unknown>,
+      };
+      allToolCalls.push(tc);
+
+      if (block.name === "hand_to_planner") handoff = "planner";
+      if (block.name === "hand_to_builder") handoff = "builder";
+
+      if (block.name === "create_task_list") {
+        extractedTasks = tc.input.tasks as AgentResponse["tasks"];
+      }
+    }
+
+    // If the model stopped without requesting tools, we're done
+    if (response.stop_reason !== "tool_use" || toolUseBlocks.length === 0) {
+      break;
+    }
+
+    // Execute tools and build tool_result messages for the next turn
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    for (const block of toolUseBlocks) {
+      if (onToolCall) {
+        const result = await onToolCall(
+          block.name,
+          block.id,
+          block.input as Record<string, unknown>
+        );
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: result.output,
+          is_error: !result.success,
+        });
+      } else {
+        // No executor provided — return a stub so the loop still works
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: "Tool executed successfully.",
+        });
+      }
+    }
+
+    // Append assistant turn (with tool_use) + user turn (with tool_results)
+    conversationMessages.push({
+      role: "assistant",
+      content: response.content,
+    });
+    conversationMessages.push({
+      role: "user",
+      content: toolResults,
+    });
   }
 
-  // Extract task list if planner created one
-  const taskListCall = toolCalls.find((tc) => tc.toolName === "create_task_list");
-  const tasks = taskListCall
-    ? (taskListCall.input.tasks as AgentResponse["tasks"])
-    : undefined;
-
   return {
-    content: textContent,
-    toolCalls,
+    content: allTextParts.join("\n"),
+    toolCalls: allToolCalls,
     handoff,
-    tasks,
+    tasks: extractedTasks,
   };
 }
 
