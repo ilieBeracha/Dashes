@@ -76,6 +76,8 @@ export async function POST(request: NextRequest, { params }: Params) {
 
 /**
  * Creates a tool executor that streams progress to the SSE client.
+ * After file-mutating tools (write/delete), immediately pushes an
+ * updated file list so the UI stays in sync during the build.
  */
 function createStreamingToolExecutor(
   controller: ReadableStreamDefaultController,
@@ -105,6 +107,20 @@ function createStreamingToolExecutor(
       sendEvent(controller, "tool_error", {
         tool: toolName,
         error: result.output,
+      });
+    }
+
+    // After any file mutation, immediately push updated file list
+    if (
+      result.success &&
+      (toolName === "write_file" || toolName === "delete_file")
+    ) {
+      const updatedFiles = await db
+        .select({ path: projectFiles.path })
+        .from(projectFiles)
+        .where(eq(projectFiles.projectId, projectId));
+      sendEvent(controller, "files", {
+        files: updatedFiles.map((f) => f.path),
       });
     }
 
@@ -197,13 +213,21 @@ async function runAgentPipeline(
     toolExecutor
   );
 
-  // Save agent response
+  // Save agent response — synthesize content if the agent only used tools
+  const agentContent =
+    agentResponse.content.trim() ||
+    (agentResponse.tasks && agentResponse.tasks.length > 0
+      ? `I've created a plan with ${agentResponse.tasks.length} task${agentResponse.tasks.length === 1 ? "" : "s"}. Starting to build now.`
+      : agentResponse.toolCalls.length > 0
+        ? summarizeToolCalls(agentResponse.toolCalls)
+        : "Done.");
+
   const [savedMessage] = await db
     .insert(messages)
     .values({
       projectId,
       role: agentType,
-      content: agentResponse.content,
+      content: agentContent,
       toolCalls: agentResponse.toolCalls,
     })
     .returning();
@@ -362,23 +386,25 @@ async function runBuilderLoop(
         title: task.title,
       });
 
-      // Save builder response as a message
-      if (builderResponse.content) {
-        const [builderMessage] = await db
-          .insert(messages)
-          .values({
-            projectId,
-            role: "builder",
-            content: builderResponse.content,
-            toolCalls: builderResponse.toolCalls,
-          })
-          .returning();
+      // Always save builder response as a message
+      const builderContent =
+        builderResponse.content.trim() ||
+        summarizeToolCalls(builderResponse.toolCalls, task.title);
 
-        sendEvent(controller, "message", {
-          message: builderMessage,
-          agentType: "builder",
-        });
-      }
+      const [builderMessage] = await db
+        .insert(messages)
+        .values({
+          projectId,
+          role: "builder",
+          content: builderContent,
+          toolCalls: builderResponse.toolCalls,
+        })
+        .returning();
+
+      sendEvent(controller, "message", {
+        message: builderMessage,
+        agentType: "builder",
+      });
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
@@ -427,4 +453,51 @@ async function runBuilderLoop(
   });
 
   sendEvent(controller, "tasks", { tasks: finalTasks });
+}
+
+/**
+ * Generate a human-readable summary from tool calls when the agent
+ * produced no text content.
+ */
+function summarizeToolCalls(
+  toolCalls: { toolName: string; input: Record<string, unknown> }[],
+  taskTitle?: string
+): string {
+  if (toolCalls.length === 0) {
+    return taskTitle ? `Completed: ${taskTitle}` : "Done.";
+  }
+
+  const writes = toolCalls
+    .filter((tc) => tc.toolName === "write_file")
+    .map((tc) => tc.input.path as string);
+  const deletes = toolCalls
+    .filter((tc) => tc.toolName === "delete_file")
+    .map((tc) => tc.input.path as string);
+  const packages = toolCalls
+    .filter((tc) => tc.toolName === "install_package")
+    .map((tc) => tc.input.package_name as string);
+
+  const parts: string[] = [];
+
+  if (taskTitle) {
+    parts.push(`**${taskTitle}**`);
+  }
+
+  if (writes.length > 0) {
+    parts.push(
+      writes.length <= 3
+        ? `Created: ${writes.join(", ")}`
+        : `Created ${writes.length} files`
+    );
+  }
+
+  if (deletes.length > 0) {
+    parts.push(`Deleted: ${deletes.join(", ")}`);
+  }
+
+  if (packages.length > 0) {
+    parts.push(`Installed: ${packages.join(", ")}`);
+  }
+
+  return parts.join("\n") || (taskTitle ? `Completed: ${taskTitle}` : "Done.");
 }

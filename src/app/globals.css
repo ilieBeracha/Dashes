@@ -17,6 +17,17 @@ body {
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   font-family: system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Lock the viewport on workspace pages (applied via component class) */
+.workspace-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* Scrollbar styling */

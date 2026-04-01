@@ -104,6 +104,8 @@ export async function callAgent(
   const allToolCalls: { toolName: string; input: Record<string, unknown> }[] = [];
   let handoff: AgentType | undefined;
   let extractedTasks: AgentResponse["tasks"];
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 3;
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     const response = await client.messages.create({
@@ -149,6 +151,7 @@ export async function callAgent(
 
     // Execute tools and build tool_result messages for the next turn
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    let turnHadErrors = false;
     for (const block of toolUseBlocks) {
       if (onToolCall) {
         const result = await onToolCall(
@@ -156,6 +159,7 @@ export async function callAgent(
           block.id,
           block.input as Record<string, unknown>
         );
+        if (!result.success) turnHadErrors = true;
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -163,13 +167,21 @@ export async function callAgent(
           is_error: !result.success,
         });
       } else {
-        // No executor provided — return a stub so the loop still works
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
           content: "Tool executed successfully.",
         });
       }
+    }
+
+    // Track consecutive error turns to avoid infinite retry loops
+    consecutiveErrors = turnHadErrors ? consecutiveErrors + 1 : 0;
+    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      allTextParts.push(
+        "Stopping: too many consecutive tool errors. Please check the task and try again."
+      );
+      break;
     }
 
     // Append assistant turn (with tool_use) + user turn (with tool_results)
