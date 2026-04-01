@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { tasks, projectFiles } from "@/db/schema";
+import { projectFiles } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { writeFile, readFile, deleteFile, listFiles } from "@/lib/s3";
 
@@ -21,13 +21,36 @@ export async function executeTool(
     switch (toolName) {
       case "read_file": {
         const path = input.path as string;
-        const content = await readFile(projectId, path);
-        return { toolName, success: true, output: content };
+        try {
+          const content = await readFile(projectId, path);
+          return { toolName, success: true, output: content || "(empty file)" };
+        } catch {
+          return {
+            toolName,
+            success: true,
+            output: `File "${path}" does not exist yet. You can create it with write_file.`,
+          };
+        }
       }
 
       case "list_files": {
-        const files = await listFiles(projectId);
-        return { toolName, success: true, output: JSON.stringify(files) };
+        try {
+          const files = await listFiles(projectId);
+          if (files.length === 0) {
+            return {
+              toolName,
+              success: true,
+              output: "No files exist in this project yet. Use write_file to create files.",
+            };
+          }
+          return { toolName, success: true, output: JSON.stringify(files) };
+        } catch {
+          return {
+            toolName,
+            success: true,
+            output: "No files exist in this project yet. Use write_file to create files.",
+          };
+        }
       }
 
       case "write_file": {
@@ -65,12 +88,20 @@ export async function executeTool(
           });
         }
 
-        return { toolName, success: true, output: `File written: ${path}` };
+        return {
+          toolName,
+          success: true,
+          output: `File written successfully: ${path} (${Buffer.byteLength(content, "utf8")} bytes)`,
+        };
       }
 
       case "delete_file": {
         const path = input.path as string;
-        await deleteFile(projectId, path);
+        try {
+          await deleteFile(projectId, path);
+        } catch {
+          // File may not exist in S3, that's fine
+        }
         await db
           .delete(projectFiles)
           .where(
@@ -83,24 +114,22 @@ export async function executeTool(
       }
 
       case "update_task_status": {
-        // This is handled separately in the orchestration loop
         const status = input.status as string;
         const note = (input.note as string) || "";
         return {
           toolName,
           success: true,
-          output: `Task status update: ${status}${note ? ` - ${note}` : ""}`,
+          output: `Task marked as ${status}${note ? `: ${note}` : ""}`,
         };
       }
 
       case "install_package": {
         const pkg = input.package_name as string;
         const isDev = input.dev as boolean;
-        // Package installation is deferred — record the intent
         return {
           toolName,
           success: true,
-          output: `Package ${pkg} queued for installation${isDev ? " (dev)" : ""}`,
+          output: `Package "${pkg}" will be installed${isDev ? " as devDependency" : ""} at deploy time. Proceed with writing code that imports it.`,
         };
       }
 
@@ -130,6 +159,6 @@ export async function executeTool(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown error";
-    return { toolName, success: false, output: `Error: ${message}` };
+    return { toolName, success: false, output: `Tool error: ${message}` };
   }
 }

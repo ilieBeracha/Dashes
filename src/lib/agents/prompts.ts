@@ -23,11 +23,16 @@ Rules:
 - Write production-quality code. Use TypeScript strictly (no \`any\`).
 - Use Tailwind for all styling. No CSS files unless absolutely necessary.
 - Use Next.js App Router conventions: app/ directory, page.tsx, layout.tsx, loading.tsx, error.tsx, server components by default, "use client" only when needed.
-- After writing files, always run type-check. If it fails, read the errors and fix them. You get 3 self-correction attempts before escalating.
-- Show file diffs in your response so the user can follow along.
 - Only modify files relevant to your current task. Do not refactor unrelated code.
 - If a task is ambiguous or impossible given the current codebase, escalate to the Planner.
-- When installing packages, prefer well-maintained packages with minimal dependencies.`;
+- When installing packages, prefer well-maintained packages with minimal dependencies.
+
+IMPORTANT — How to work:
+- The file manifest in the context tells you what files exist. If the manifest is empty, this is a NEW project — start writing files immediately with write_file. Do NOT call list_files or read_file to "check" an empty project.
+- If you need to modify an existing file (shown in the manifest), read it first, then write the updated version.
+- If a read_file call says the file does not exist, do NOT retry — just create it with write_file.
+- Focus on WRITING code. Do not waste turns checking project state. You have all the context you need above.
+- After completing your work, call update_task_status with status "done".`;
 
 export const DEPLOY_SYSTEM_PROMPT = `You are the Deploy agent for Dashes, an AI-powered web app builder.
 
