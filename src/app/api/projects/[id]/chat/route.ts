@@ -76,6 +76,8 @@ export async function POST(request: NextRequest, { params }: Params) {
 
 /**
  * Creates a tool executor that streams progress to the SSE client.
+ * After file-mutating tools (write/delete), immediately pushes an
+ * updated file list so the UI stays in sync during the build.
  */
 function createStreamingToolExecutor(
   controller: ReadableStreamDefaultController,
@@ -105,6 +107,20 @@ function createStreamingToolExecutor(
       sendEvent(controller, "tool_error", {
         tool: toolName,
         error: result.output,
+      });
+    }
+
+    // After any file mutation, immediately push updated file list
+    if (
+      result.success &&
+      (toolName === "write_file" || toolName === "delete_file")
+    ) {
+      const updatedFiles = await db
+        .select({ path: projectFiles.path })
+        .from(projectFiles)
+        .where(eq(projectFiles.projectId, projectId));
+      sendEvent(controller, "files", {
+        files: updatedFiles.map((f) => f.path),
       });
     }
 

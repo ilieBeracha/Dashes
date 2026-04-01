@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { FileTree } from "./file-tree";
 import { CodeEditor } from "./code-editor";
+import { FolderOpen } from "lucide-react";
 
 interface FilesPanelProps {
   files: string[];
@@ -27,7 +28,9 @@ export function FilesPanel({
     }
 
     setLoading(true);
-    fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(activeFile)}`)
+    fetch(
+      `/api/projects/${projectId}/files?path=${encodeURIComponent(activeFile)}`
+    )
       .then((res) => (res.ok ? res.text() : ""))
       .then(setFileContent)
       .finally(() => setLoading(false));
@@ -47,13 +50,13 @@ export function FilesPanel({
       {/* Tab bar */}
       {activeFile && (
         <div className="flex h-9 items-center border-b border-border bg-bg-secondary px-3 text-xs">
-          <span className="text-text-secondary">{activeFile}</span>
+          <span className="truncate text-text-secondary">{activeFile}</span>
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1">
         {/* File tree */}
-        <div className="w-48 shrink-0 overflow-y-auto border-r border-border bg-bg-secondary p-2">
+        <div className="w-40 shrink-0 overflow-y-auto border-r border-border bg-bg-secondary p-1.5 sm:w-48 sm:p-2">
           <FileTree
             files={files}
             activeFile={activeFile}
@@ -62,7 +65,7 @@ export function FilesPanel({
         </div>
 
         {/* Editor */}
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           {activeFile ? (
             loading ? (
               <div className="flex h-full items-center justify-center text-sm text-text-secondary">
@@ -77,8 +80,13 @@ export function FilesPanel({
               />
             )
           ) : (
-            <div className="flex h-full items-center justify-center text-sm text-text-secondary">
-              Select a file to edit
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-text-secondary">
+              <FolderOpen className="h-8 w-8 opacity-40" />
+              <p className="text-center text-xs">
+                {files.length === 0
+                  ? "No files yet — start a chat to build your app"
+                  : "Select a file to view"}
+              </p>
             </div>
           )}
         </div>

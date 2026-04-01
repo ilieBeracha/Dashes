@@ -42,7 +42,6 @@ export function WorkspaceClient({
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 
-  // Load existing messages, tasks, and files on mount
   useEffect(() => {
     fetch(`/api/projects/${projectId}/messages`)
       .then((res) => (res.ok ? res.json() : []))
@@ -102,7 +101,6 @@ export function WorkspaceClient({
           return;
         }
 
-        // Read SSE stream
         const reader = res.body?.getReader();
         if (!reader) {
           setIsAgentWorking(false);
@@ -118,7 +116,6 @@ export function WorkspaceClient({
 
           buffer += decoder.decode(value, { stream: true });
 
-          // Parse SSE events from buffer
           const lines = buffer.split("\n");
           buffer = "";
 
@@ -262,20 +259,30 @@ export function WorkspaceClient({
     }
   }
 
-  const MOBILE_TABS: { key: MobileTab; label: string; icon: typeof MessageSquare }[] = [
+  const MOBILE_TABS: {
+    key: MobileTab;
+    label: string;
+    icon: typeof MessageSquare;
+    badge?: number;
+  }[] = [
     { key: "chat", label: "Chat", icon: MessageSquare },
-    { key: "files", label: "Files", icon: FolderOpen },
+    {
+      key: "files",
+      label: "Files",
+      icon: FolderOpen,
+      badge: files.length || undefined,
+    },
     { key: "preview", label: "Preview", icon: Eye },
   ];
 
   return (
-    <div className="flex h-[100dvh] flex-col">
+    <div className="workspace-root bg-bg-primary">
       {/* Top bar */}
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-bg-secondary px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <Link
             href="/dashboard"
-            className="flex shrink-0 items-center gap-1 text-sm text-text-secondary hover:text-text-primary"
+            className="flex shrink-0 items-center gap-1 text-sm text-text-secondary transition-colors hover:text-text-primary"
           >
             <ArrowLeft className="h-4 w-4" />
             <span className="hidden sm:inline">Dashboard</span>
@@ -283,7 +290,7 @@ export function WorkspaceClient({
           <span className="text-border">/</span>
           <span className="truncate text-sm font-medium">{projectName}</span>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5">
           <Link href={`/project/${projectId}/settings`}>
             <Button variant="ghost" size="sm">
               <Settings className="h-4 w-4" />
@@ -298,7 +305,6 @@ export function WorkspaceClient({
 
       {/* Desktop layout */}
       <div className="hidden flex-1 overflow-hidden md:flex">
-        {/* Left: Chat + Tasks */}
         <div className="flex w-[400px] shrink-0 flex-col border-r border-border">
           <div className="flex-1 overflow-hidden">
             <ChatPanel
@@ -312,7 +318,6 @@ export function WorkspaceClient({
           <TasksPanel tasks={tasks} />
         </div>
 
-        {/* Right: Files + Preview */}
         <div className="flex flex-1 overflow-hidden">
           <div className="w-1/2 border-r border-border">
             <FilesPanel
@@ -329,12 +334,12 @@ export function WorkspaceClient({
       </div>
 
       {/* Mobile layout */}
-      <div className="flex flex-1 flex-col overflow-hidden md:hidden">
-        {/* Active tab content */}
-        <div className="flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col md:hidden">
+        {/* Tab content */}
+        <div className="min-h-0 flex-1">
           {mobileTab === "chat" && (
             <div className="flex h-full flex-col">
-              <div className="flex-1 overflow-hidden">
+              <div className="min-h-0 flex-1">
                 <ChatPanel
                   messages={messages}
                   onSendMessage={handleSendMessage}
@@ -360,19 +365,29 @@ export function WorkspaceClient({
         </div>
 
         {/* Bottom tab bar */}
-        <nav className="flex shrink-0 border-t border-border bg-bg-secondary">
-          {MOBILE_TABS.map(({ key, label, icon: Icon }) => (
+        <nav className="flex shrink-0 border-t border-border bg-bg-secondary pb-[env(safe-area-inset-bottom)]">
+          {MOBILE_TABS.map(({ key, label, icon: Icon, badge }) => (
             <button
               key={key}
               onClick={() => setMobileTab(key)}
-              className={`flex flex-1 flex-col items-center gap-0.5 py-2 text-xs transition-colors ${
+              className={`relative flex flex-1 flex-col items-center gap-0.5 pb-1.5 pt-2 text-xs transition-colors ${
                 mobileTab === key
                   ? "text-accent"
-                  : "text-text-secondary hover:text-text-primary"
+                  : "text-text-secondary active:text-text-primary"
               }`}
             >
-              <Icon className="h-5 w-5" />
+              <div className="relative">
+                <Icon className="h-5 w-5" />
+                {badge ? (
+                  <span className="absolute -right-2 -top-1 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-accent px-0.5 text-[9px] font-bold text-white">
+                    {badge > 99 ? "99+" : badge}
+                  </span>
+                ) : null}
+              </div>
               {label}
+              {mobileTab === key && (
+                <span className="absolute bottom-0 left-1/2 h-0.5 w-6 -translate-x-1/2 rounded-full bg-accent" />
+              )}
             </button>
           ))}
         </nav>
