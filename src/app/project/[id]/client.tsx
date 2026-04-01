@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -9,6 +9,8 @@ import {
   MessageSquare,
   FolderOpen,
   Eye,
+  Bug,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatPanel } from "@/components/chat/chat-panel";
@@ -18,6 +20,12 @@ import { PreviewPanel } from "@/components/preview/preview-panel";
 import type { Message, Task } from "@/types";
 
 type MobileTab = "chat" | "files" | "preview";
+
+interface DebugEntry {
+  ts: number;
+  type: string;
+  data: unknown;
+}
 
 interface WorkspaceClientProps {
   projectId: string;
@@ -41,25 +49,91 @@ export function WorkspaceClient({
   const [agentStatus, setAgentStatus] = useState("");
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
+  const [copied, setCopied] = useState(false);
+
+  // Debug log — persists across renders, never cleared automatically
+  const debugLog = useRef<DebugEntry[]>([]);
+
+  function logDebug(type: string, data: unknown) {
+    debugLog.current.push({ ts: Date.now(), type, data });
+  }
+
+  async function copyDebugLog() {
+    const summary = {
+      projectId,
+      projectName,
+      capturedAt: new Date().toISOString(),
+      messagesCount: messages.length,
+      tasksCount: tasks.length,
+      filesCount: files.length,
+      isAgentWorking,
+      agentStatus,
+      activeAgent,
+      events: debugLog.current.map((e) => ({
+        ...e,
+        ts: new Date(e.ts).toISOString(),
+      })),
+      // Include current messages (trimmed content for readability)
+      messages: messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content:
+          m.content.length > 300
+            ? m.content.slice(0, 300) + "...[trimmed]"
+            : m.content,
+        createdAt: m.createdAt,
+      })),
+      tasks: tasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+      })),
+      files,
+    };
+
+    try {
+      await navigator.clipboard.writeText(
+        JSON.stringify(summary, null, 2)
+      );
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback: prompt with text
+      const text = JSON.stringify(summary, null, 2);
+      prompt("Copy this debug log:", text);
+    }
+  }
 
   useEffect(() => {
+    logDebug("mount", { projectId });
+
     fetch(`/api/projects/${projectId}/messages`)
       .then((res) => (res.ok ? res.json() : []))
-      .then(setMessages);
+      .then((data) => {
+        setMessages(data);
+        logDebug("loaded_messages", { count: data.length });
+      });
 
     fetch(`/api/projects/${projectId}/tasks`)
       .then((res) => (res.ok ? res.json() : []))
-      .then(setTasks);
+      .then((data) => {
+        setTasks(data);
+        logDebug("loaded_tasks", { count: data.length });
+      });
 
     fetch(`/api/projects/${projectId}/files`)
       .then((res) => (res.ok ? res.json() : []))
-      .then(
-        (data) => setFiles(data.map?.((f: { path: string }) => f.path) ?? [])
-      );
+      .then((data) => {
+        const paths = data.map?.((f: { path: string }) => f.path) ?? [];
+        setFiles(paths);
+        logDebug("loaded_files", { count: paths.length });
+      });
   }, [projectId]);
 
   const handleSendMessage = useCallback(
     async (content: string) => {
+      logDebug("user_send", { content: content.slice(0, 200) });
+
       const userMessage: Message = {
         id: crypto.randomUUID(),
         projectId,
@@ -81,8 +155,14 @@ export function WorkspaceClient({
           body: JSON.stringify({ content }),
         });
 
+        logDebug("chat_response", {
+          ok: res.ok,
+          status: res.status,
+        });
+
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
+          logDebug("chat_error", err);
           setMessages((prev) => [
             ...prev,
             {
@@ -103,6 +183,7 @@ export function WorkspaceClient({
 
         const reader = res.body?.getReader();
         if (!reader) {
+          logDebug("no_reader", {});
           setIsAgentWorking(false);
           return;
         }
@@ -141,7 +222,12 @@ export function WorkspaceClient({
             if (currentData) buffer += `data: ${currentData}\n`;
           }
         }
-      } catch {
+
+        logDebug("stream_end", {});
+      } catch (err) {
+        logDebug("stream_error", {
+          error: err instanceof Error ? err.message : String(err),
+        });
         setMessages((prev) => [
           ...prev,
           {
@@ -166,6 +252,14 @@ export function WorkspaceClient({
   );
 
   function handleSSEEvent(event: string, rawData: string) {
+    // Log every SSE event for debugging
+    try {
+      const parsed = JSON.parse(rawData);
+      logDebug(`sse:${event}`, summarizeForLog(event, parsed));
+    } catch {
+      logDebug(`sse:${event}:parse_fail`, { raw: rawData.slice(0, 200) });
+    }
+
     try {
       const data = JSON.parse(rawData);
 
@@ -243,11 +337,13 @@ export function WorkspaceClient({
   }
 
   async function handleDeploy() {
+    logDebug("deploy_start", {});
     setIsAgentWorking(true);
     try {
       const res = await fetch(`/api/projects/${projectId}/deploy`, {
         method: "POST",
       });
+      logDebug("deploy_response", { ok: res.ok, status: res.status });
       if (res.ok) {
         const data = await res.json();
         if (data.message) {
@@ -291,6 +387,19 @@ export function WorkspaceClient({
           <span className="truncate text-sm font-medium">{projectName}</span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* Debug log copy button */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={copyDebugLog}
+            title="Copy debug log to clipboard"
+          >
+            {copied ? (
+              <Check className="h-4 w-4 text-success" />
+            ) : (
+              <Bug className="h-4 w-4" />
+            )}
+          </Button>
           <Link href={`/project/${projectId}/settings`}>
             <Button variant="ghost" size="sm">
               <Settings className="h-4 w-4" />
@@ -335,7 +444,6 @@ export function WorkspaceClient({
 
       {/* Mobile layout */}
       <div className="flex min-h-0 flex-1 flex-col md:hidden">
-        {/* Tab content */}
         <div className="min-h-0 flex-1">
           {mobileTab === "chat" && (
             <div className="flex h-full flex-col">
@@ -394,4 +502,41 @@ export function WorkspaceClient({
       </div>
     </div>
   );
+}
+
+/**
+ * Trim large payloads for the debug log to keep it readable.
+ */
+function summarizeForLog(
+  event: string,
+  data: Record<string, unknown>
+): Record<string, unknown> {
+  if (event === "message" && data.message) {
+    const msg = data.message as Record<string, unknown>;
+    return {
+      agentType: data.agentType,
+      messageId: msg.id,
+      role: msg.role,
+      contentLength: typeof msg.content === "string" ? msg.content.length : 0,
+      contentPreview:
+        typeof msg.content === "string"
+          ? msg.content.slice(0, 100)
+          : undefined,
+    };
+  }
+  if (event === "files" && data.files) {
+    return { fileCount: (data.files as string[]).length, files: data.files };
+  }
+  if (event === "tasks" && data.tasks) {
+    const taskArr = data.tasks as { id: string; title: string; status: string }[];
+    return {
+      taskCount: taskArr.length,
+      tasks: taskArr.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+      })),
+    };
+  }
+  return data;
 }
