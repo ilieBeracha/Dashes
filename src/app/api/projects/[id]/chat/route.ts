@@ -6,8 +6,11 @@ import { eq, and, desc } from "drizzle-orm";
 import { routeMessage, callAgent } from "@/lib/agents/orchestrator";
 import { executeTool } from "@/lib/agents/tool-executor";
 
-// Allow up to 120 seconds for agent calls (planning + building)
-export const maxDuration = 120;
+// Allow up to 300 seconds — building many tasks takes time
+export const maxDuration = 300;
+
+// Per-task timeout: 60 seconds per individual builder task
+const TASK_TIMEOUT_MS = 60_000;
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -88,7 +91,6 @@ function createStreamingToolExecutor(
     _toolId: string,
     input: Record<string, unknown>
   ) => {
-    // Stream what the agent is doing
     sendEvent(controller, "tool_exec", {
       tool: toolName,
       input:
@@ -190,9 +192,36 @@ async function runAgentPipeline(
           : "Preparing deployment...",
   });
 
+  // --- BUILDER with pending tasks: go straight to the task loop ---
+  if (agentType === "builder" && hasPendingTasks) {
+    // Save an acknowledgement message so the user sees a response
+    const ackContent = `Continuing to build... ${currentTasks.filter((t) => t.status === "pending" || t.status === "in_progress").length} tasks remaining.`;
+    const [ackMessage] = await db
+      .insert(messages)
+      .values({ projectId, role: "builder", content: ackContent })
+      .returning();
+
+    sendEvent(controller, "message", {
+      message: ackMessage,
+      agentType: "builder",
+    });
+
+    await runBuilderLoop(controller, projectId, currentTasks);
+
+    // Send final file list
+    const updatedFiles = await db
+      .select({ path: projectFiles.path })
+      .from(projectFiles)
+      .where(eq(projectFiles.projectId, projectId));
+    sendEvent(controller, "files", {
+      files: updatedFiles.map((f) => f.path),
+    });
+    return;
+  }
+
+  // --- PLANNER or BUILDER without tasks or DEPLOY: single agent call ---
   const toolExecutor = createStreamingToolExecutor(controller, projectId);
 
-  // Call the agent with the tool-use loop
   const agentResponse = await callAgent(
     agentType,
     {
@@ -235,7 +264,6 @@ async function runAgentPipeline(
   sendEvent(controller, "message", { message: savedMessage, agentType });
 
   // If planner created tasks, save them and auto-trigger builder
-  let savedTasks = currentTasks;
   if (agentResponse.tasks && agentResponse.tasks.length > 0) {
     sendEvent(controller, "status", {
       agent: "planner",
@@ -245,7 +273,9 @@ async function runAgentPipeline(
     // Clear existing pending tasks
     await db
       .delete(tasks)
-      .where(and(eq(tasks.projectId, projectId), eq(tasks.status, "pending")));
+      .where(
+        and(eq(tasks.projectId, projectId), eq(tasks.status, "pending"))
+      );
 
     // Insert new tasks
     const newTasks = await db
@@ -265,11 +295,10 @@ async function runAgentPipeline(
     // Mark project as having an active plan
     await db
       .update(projects)
-      .set({ hasActivePlan: true, currentAgent: agentType })
+      .set({ hasActivePlan: true, currentAgent: "planner" })
       .where(eq(projects.id, projectId));
 
-    savedTasks = newTasks;
-    sendEvent(controller, "tasks", { tasks: savedTasks });
+    sendEvent(controller, "tasks", { tasks: newTasks });
 
     // Auto-trigger builder to start executing tasks
     sendEvent(controller, "status", {
@@ -277,7 +306,7 @@ async function runAgentPipeline(
       message: "Starting to build...",
     });
 
-    await runBuilderLoop(controller, projectId, savedTasks);
+    await runBuilderLoop(controller, projectId, newTasks);
   }
 
   // Send final file list
@@ -291,16 +320,20 @@ async function runAgentPipeline(
 /**
  * Run the builder agent in a loop, executing one task at a time.
  * Each task gets a full agentic tool-use loop (multi-turn).
+ * Processes tasks that are pending or stuck in_progress.
  */
 async function runBuilderLoop(
   controller: ReadableStreamDefaultController,
   projectId: string,
   taskList: (typeof tasks.$inferSelect)[]
 ) {
-  const pendingTasks = taskList.filter((t) => t.status === "pending");
+  // Pick up pending tasks AND tasks stuck in "in_progress" (from a previous failed run)
+  const workableTasks = taskList.filter(
+    (t) => t.status === "pending" || t.status === "in_progress"
+  );
 
-  for (const task of pendingTasks) {
-    // Mark task as in_progress
+  for (const task of workableTasks) {
+    // Mark task as in_progress (idempotent if already in_progress)
     await db
       .update(tasks)
       .set({ status: "in_progress", startedAt: new Date() })
@@ -340,8 +373,8 @@ async function runBuilderLoop(
 
       const toolExecutor = createStreamingToolExecutor(controller, projectId);
 
-      // Call builder agent with full tool-use loop
-      const builderResponse = await callAgent(
+      // Call builder agent with full tool-use loop + per-task timeout
+      const builderPromise = callAgent(
         "builder",
         {
           projectId,
@@ -365,6 +398,16 @@ async function runBuilderLoop(
         },
         toolExecutor
       );
+
+      const builderResponse = await Promise.race([
+        builderPromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Task timed out after ${TASK_TIMEOUT_MS / 1000}s`)),
+            TASK_TIMEOUT_MS
+          )
+        ),
+      ]);
 
       // Determine outcome
       const taskFailed = !!builderResponse.handoff;
@@ -428,6 +471,24 @@ async function runBuilderLoop(
       sendEvent(controller, "status", {
         agent: "builder",
         message: `Task failed: ${task.title}`,
+      });
+
+      // Save error as a message so the user sees it after refresh
+      await db.insert(messages).values({
+        projectId,
+        role: "system",
+        content: `Task "${task.title}" failed: ${errorMessage}`,
+      });
+
+      sendEvent(controller, "message", {
+        message: {
+          id: crypto.randomUUID(),
+          projectId,
+          role: "system",
+          content: `Task "${task.title}" failed: ${errorMessage}`,
+          createdAt: new Date(),
+        },
+        agentType: "system",
       });
     }
   }
