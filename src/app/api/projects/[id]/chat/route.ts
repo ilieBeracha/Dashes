@@ -55,6 +55,17 @@ export async function POST(request: NextRequest, { params }: Params) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      // Send a heartbeat comment every 15s to keep the SSE connection alive.
+      // Browsers and proxies may drop idle connections after ~30-60s.
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
+        } catch {
+          // Controller may already be closed
+          clearInterval(heartbeat);
+        }
+      }, 15_000);
+
       try {
         await runAgentPipeline(controller, id, content, toolbarContext, project);
       } catch (error) {
@@ -62,6 +73,7 @@ export async function POST(request: NextRequest, { params }: Params) {
           error instanceof Error ? error.message : "Unknown error";
         sendEvent(controller, "error", { error: message });
       } finally {
+        clearInterval(heartbeat);
         sendEvent(controller, "done", {});
         controller.close();
       }
