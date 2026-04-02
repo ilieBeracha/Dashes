@@ -78,7 +78,8 @@ export type ToolExecutor = (
 export async function callAgent(
   agentType: AgentType,
   context: AgentContext,
-  onToolCall?: ToolExecutor
+  onToolCall?: ToolExecutor,
+  signal?: AbortSignal
 ): Promise<AgentResponse> {
   const config = AGENT_CONFIG[agentType];
 
@@ -108,13 +109,18 @@ export async function callAgent(
   const MAX_CONSECUTIVE_ERRORS = 3;
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    if (signal?.aborted) {
+      allTextParts.push("Task was cancelled.");
+      break;
+    }
+
     const response = await client.messages.create({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4096,
       system: config.systemPrompt,
       tools,
       messages: conversationMessages,
-    });
+    }, { signal });
 
     // Collect text blocks
     const textBlocks = response.content.filter(

@@ -6,11 +6,11 @@ import { eq, and, desc } from "drizzle-orm";
 import { routeMessage, callAgent } from "@/lib/agents/orchestrator";
 import { executeTool } from "@/lib/agents/tool-executor";
 
-// Allow up to 300 seconds — building many tasks takes time
-export const maxDuration = 300;
+// Allow up to 600 seconds — building many tasks takes time
+export const maxDuration = 600;
 
-// Per-task timeout: 60 seconds per individual builder task
-const TASK_TIMEOUT_MS = 60_000;
+// Per-task timeout: 120 seconds per individual builder task
+const TASK_TIMEOUT_MS = 120_000;
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -374,40 +374,46 @@ async function runBuilderLoop(
       const toolExecutor = createStreamingToolExecutor(controller, projectId);
 
       // Call builder agent with full tool-use loop + per-task timeout
-      const builderPromise = callAgent(
-        "builder",
-        {
-          projectId,
-          recentMessages: [
-            ...recentMessages.reverse().map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            {
-              role: "user",
-              content: `Execute this task now:\n\nTitle: ${task.title}\nDescription: ${task.description}\nFiles: ${(task.files ?? []).join(", ")}`,
-            },
-          ],
-          taskList: allTasks.map((t) => ({
-            title: t.title,
-            description: t.description,
-            status: t.status,
-          })),
-          fileManifest: currentManifest,
-          relevantFiles: [],
-        },
-        toolExecutor
-      );
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => {
+        abortController.abort();
+      }, TASK_TIMEOUT_MS);
 
-      const builderResponse = await Promise.race([
-        builderPromise,
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Task timed out after ${TASK_TIMEOUT_MS / 1000}s`)),
-            TASK_TIMEOUT_MS
-          )
-        ),
-      ]);
+      let builderResponse;
+      try {
+        builderResponse = await callAgent(
+          "builder",
+          {
+            projectId,
+            recentMessages: [
+              ...recentMessages.reverse().map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+              {
+                role: "user",
+                content: `Execute this task now:\n\nTitle: ${task.title}\nDescription: ${task.description}\nFiles: ${(task.files ?? []).join(", ")}`,
+              },
+            ],
+            taskList: allTasks.map((t) => ({
+              title: t.title,
+              description: t.description,
+              status: t.status,
+            })),
+            fileManifest: currentManifest,
+            relevantFiles: [],
+          },
+          toolExecutor,
+          abortController.signal
+        );
+      } catch (err) {
+        if (abortController.signal.aborted) {
+          throw new Error(`Task timed out after ${TASK_TIMEOUT_MS / 1000}s`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       // Determine outcome
       const taskFailed = !!builderResponse.handoff;
