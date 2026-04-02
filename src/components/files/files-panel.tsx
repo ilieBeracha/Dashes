@@ -17,38 +17,49 @@ interface FilesPanelProps {
 }
 
 /**
- * Derive the component name from a file path, if it has a matching preview.
- * e.g. "src/components/MetricCard.tsx" → "MetricCard" (if __previews__/MetricCard.preview.tsx exists)
+ * Derive the component name from a file path if it's previewable.
+ * A file is previewable if:
+ *   1. It has a matching __previews__/<Name>.preview.tsx file, OR
+ *   2. It's a .tsx/.jsx component file (not a Next.js convention file like page/layout)
  */
 function getPreviewableComponent(
   filePath: string,
   files: string[]
-): string | null {
+): { name: string; hasPreviewFile: boolean } | null {
   if (!filePath) return null;
 
-  // Only .tsx/.jsx component files (not pages, layouts, etc.)
+  // Only .tsx/.jsx component files
   if (!filePath.endsWith(".tsx") && !filePath.endsWith(".jsx")) return null;
 
   const fileName = filePath.split("/").pop() ?? "";
-  // Skip Next.js convention files
+  // Skip Next.js convention files and non-component files
   if (
-    ["page.tsx", "layout.tsx", "loading.tsx", "error.tsx", "not-found.tsx"].includes(
-      fileName
-    )
+    [
+      "page.tsx", "layout.tsx", "loading.tsx", "error.tsx", "not-found.tsx",
+      "route.tsx", "middleware.tsx", "template.tsx",
+    ].includes(fileName)
   ) {
     return null;
   }
 
-  // Derive component name from filename
-  const componentName = fileName.replace(/\.(tsx|jsx)$/, "");
-
-  // Check if a preview file exists
-  const previewPath = `__previews__/${componentName}.preview.tsx`;
-  if (files.includes(previewPath)) {
-    return componentName;
+  // Skip data/lib/util files
+  if (
+    filePath.includes("/lib/") ||
+    filePath.includes("/utils/") ||
+    filePath.includes("/hooks/") ||
+    filePath.includes("/types/") ||
+    filePath.includes("/data/")
+  ) {
+    return null;
   }
 
-  return null;
+  const componentName = fileName.replace(/\.(tsx|jsx)$/, "");
+
+  // Check if a dedicated preview file exists
+  const previewPath = `__previews__/${componentName}.preview.tsx`;
+  const hasPreviewFile = files.includes(previewPath);
+
+  return { name: componentName, hasPreviewFile };
 }
 
 export function FilesPanel({
@@ -97,25 +108,12 @@ export function FilesPanel({
     });
   }
 
-  // Collect which files have previews for the tree badges
+  // Collect which files are previewable for the tree badges
   const previewSet = useMemo(() => {
     const set = new Set<string>();
     for (const f of files) {
-      if (
-        f.startsWith("__previews__/") &&
-        f.endsWith(".preview.tsx")
-      ) {
-        const name = f.replace("__previews__/", "").replace(".preview.tsx", "");
-        // Find the matching component file
-        const match = files.find(
-          (p) =>
-            p.endsWith(`/${name}.tsx`) ||
-            p.endsWith(`/${name}.jsx`) ||
-            p === `${name}.tsx` ||
-            p === `${name}.jsx`
-        );
-        if (match) set.add(match);
-      }
+      const result = getPreviewableComponent(f, files);
+      if (result) set.add(f);
     }
     return set;
   }, [files]);
@@ -182,7 +180,9 @@ export function FilesPanel({
             viewMode === "preview" && previewableComponent ? (
               <ComponentPreview
                 projectId={projectId}
-                componentName={previewableComponent}
+                componentName={previewableComponent.name}
+                filePath={activeFile}
+                hasPreviewFile={previewableComponent.hasPreviewFile}
               />
             ) : loading ? (
               <div className="flex h-full items-center justify-center text-sm text-text-secondary">

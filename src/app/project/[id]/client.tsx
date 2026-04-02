@@ -148,12 +148,12 @@ export function WorkspaceClient({
       setIsAgentWorking(true);
       setAgentStatus("Connecting...");
 
-      try {
-        // Use AbortController with a generous timeout to prevent browser-level
-        // "Load failed" errors on long-running SSE streams
-        const abortController = new AbortController();
-        const timeoutId = setTimeout(() => abortController.abort(), 10 * 60 * 1000); // 10 min
+      // Use AbortController with a generous timeout to prevent browser-level
+      // "Load failed" errors on long-running SSE streams
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 10 * 60 * 1000); // 10 min
 
+      try {
         const res = await fetch(`/api/projects/${projectId}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
