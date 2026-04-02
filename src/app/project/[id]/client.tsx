@@ -149,10 +149,17 @@ export function WorkspaceClient({
       setAgentStatus("Connecting...");
 
       try {
+        // Use AbortController with a generous timeout to prevent browser-level
+        // "Load failed" errors on long-running SSE streams
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 10 * 60 * 1000); // 10 min
+
         const res = await fetch(`/api/projects/${projectId}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content }),
+          signal: abortController.signal,
+          keepalive: false,
         });
 
         logDebug("chat_response", {
@@ -223,8 +230,10 @@ export function WorkspaceClient({
           }
         }
 
+        clearTimeout(timeoutId);
         logDebug("stream_end", {});
       } catch (err) {
+        clearTimeout(timeoutId);
         logDebug("stream_error", {
           error: err instanceof Error ? err.message : String(err),
         });

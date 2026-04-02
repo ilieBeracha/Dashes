@@ -149,6 +149,31 @@ export async function executeTool(
         };
       }
 
+      case "create_task_list": {
+        const taskArr = input.tasks as { title: string }[];
+        return {
+          toolName,
+          success: true,
+          output: `Task list created with ${taskArr?.length ?? 0} tasks. The builder will now execute them.`,
+        };
+      }
+
+      case "ask_user": {
+        return {
+          toolName,
+          success: true,
+          output: `Question sent to user: ${input.question as string}`,
+        };
+      }
+
+      case "hand_to_builder": {
+        return {
+          toolName,
+          success: true,
+          output: "Handing off to builder agent",
+        };
+      }
+
       default:
         return {
           toolName,
