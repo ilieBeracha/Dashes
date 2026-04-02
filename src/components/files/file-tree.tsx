@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, File, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight, File, Folder, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface FileTreeProps {
   files: string[];
   activeFile: string | null;
   onSelectFile: (path: string) => void;
+  previewSet?: Set<string>;
 }
 
 interface TreeNode {
@@ -17,7 +18,12 @@ interface TreeNode {
   children: TreeNode[];
 }
 
-export function FileTree({ files, activeFile, onSelectFile }: FileTreeProps) {
+export function FileTree({
+  files,
+  activeFile,
+  onSelectFile,
+  previewSet,
+}: FileTreeProps) {
   const tree = buildTree(files);
 
   if (files.length === 0) {
@@ -34,6 +40,7 @@ export function FileTree({ files, activeFile, onSelectFile }: FileTreeProps) {
           node={node}
           activeFile={activeFile}
           onSelectFile={onSelectFile}
+          previewSet={previewSet}
           depth={0}
         />
       ))}
@@ -45,14 +52,17 @@ function TreeNodeItem({
   node,
   activeFile,
   onSelectFile,
+  previewSet,
   depth,
 }: {
   node: TreeNode;
   activeFile: string | null;
   onSelectFile: (path: string) => void;
+  previewSet?: Set<string>;
   depth: number;
 }) {
   const [expanded, setExpanded] = useState(depth < 2);
+  const hasPreview = previewSet?.has(node.path) ?? false;
 
   if (node.isDir) {
     return (
@@ -77,6 +87,7 @@ function TreeNodeItem({
               node={child}
               activeFile={activeFile}
               onSelectFile={onSelectFile}
+              previewSet={previewSet}
               depth={depth + 1}
             />
           ))}
@@ -94,7 +105,13 @@ function TreeNodeItem({
       style={{ paddingLeft: `${depth * 12 + 4}px` }}
     >
       <File className="h-3.5 w-3.5 text-text-secondary" />
-      <span>{node.name}</span>
+      <span className="flex-1 truncate text-left">{node.name}</span>
+      {hasPreview && (
+        <Eye
+          className="h-3 w-3 shrink-0 text-accent opacity-60"
+          title="Preview available"
+        />
+      )}
     </button>
   );
 }
